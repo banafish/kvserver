@@ -1,0 +1,5 @@
+#logFile: kv.log
+debug: true
+raft:
+  peers: [localhost:6666,localhost:7777]
+  me: localhost:6666
