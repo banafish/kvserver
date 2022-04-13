@@ -11,17 +11,17 @@ const (
 	OpTypeGet    OpType = "Get"
 	OpTypePut    OpType = "Put"
 	OpTypeAppend OpType = "Append"
+	OpTypeDelete OpType = "Delete"
 )
 
 type Err string
 
-// Put or Append
 type PutAppendArgs struct {
 	ClientID string
 	Seq      int
 	Key      string
 	Value    string
-	Op       OpType // "Put" or "Append"
+	Op       OpType
 }
 
 type PutAppendReply struct {

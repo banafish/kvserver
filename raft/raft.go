@@ -60,13 +60,18 @@ const (
 )
 
 func (rf *Raft) run() {
+	// 没有 kill 掉就一直循环
 	for !rf.killed() {
+		// 获取节点状态
 		switch rf.getState() {
 		case raftStateLeader:
+			// 以 leader 运行
 			rf.runAsLeader()
 		case raftStateCandidate:
+			// 以 candidate 运行
 			rf.runAsCandidate()
 		case raftStateFollower:
+			// 以 follower 运行
 			rf.runAsFollower()
 		default:
 			log.Fatalf("err raft state %v", rf.getState())
@@ -110,6 +115,7 @@ func (rf *Raft) runAsLeader() {
 		}
 	}()
 
+	// 通知复制协程开始复制
 	rf.asyncNotifyAllCh(canReplicateChs)
 
 	leaseTimer := time.After(rf.leaseDuration)
@@ -137,30 +143,39 @@ func (rf *Raft) runAsLeader() {
 			}
 			util.DPrintf("%v S%d handle startCommandCh %+v", util.DLeader, rf.me, s)
 		case <-leaseTimer:
+			// 检查租期
 			maxDiff := rf.checkLease()
+			// 刷新租期
 			leaseTimer = time.After(rf.leaseDuration - maxDiff)
 		}
 	}
 }
 
 func (rf *Raft) runAsCandidate() {
+	// 初始化选举超时定时器
 	electionTimer := rf.randomTimeout(rf.electionTimeout)
-	currentTerm := rf.getCurrentTerm() + 1
 	rf.votedFor = rf.me
+	// 递增任期
+	currentTerm := rf.getCurrentTerm() + 1
 	rf.setCurrentTerm(currentTerm)
 	util.DPrintf("%v S%v run as candidate rf %+v", util.DInfo, rf.me, rf)
+	// 发起投票
 	voteCh := rf.startElection(currentTerm)
 	cnt := 0
 	for !rf.killed() && rf.getState() == raftStateCandidate {
 		select {
 		case <-electionTimer:
+			// 未能在选举超时间隔内收到足够的选票
 			return
 		case rpc := <-rf.rpcCh:
+			// 处理 RPC 请求
 			rf.processRPC(rpc)
 		case s := <-rf.startCommandCh:
+			// 处理命令
 			s.LeaderID = rf.leaderID
 			s.IsLeader <- false
 		case reply := <-voteCh:
+			// 发现更大的任期
 			if reply.Term > currentTerm {
 				util.DPrintf("%v S%v candidate become follower", util.DVote, rf.me)
 				rf.setCurrentTerm(reply.Term)
@@ -168,8 +183,10 @@ func (rf *Raft) runAsCandidate() {
 				return
 			}
 			if reply.VoteGranted {
+				// 统计选票
 				cnt++
 				if rf.isMoreThanHalf(cnt) {
+					// 获取到半数以上的选票，当选 leader
 					util.DPrintf("%v S%v candidate become leader", util.DVote, rf.me)
 					lastLogIndex := rf.persister.appendLog(Log{
 						Term:    currentTerm,
@@ -186,20 +203,25 @@ func (rf *Raft) runAsCandidate() {
 
 func (rf *Raft) runAsFollower() {
 	util.DPrintf("%v S%v run as follower rf %+v", util.DInfo, rf.me, rf)
+	// 初始化心跳定时器
 	heartBeatTimer := rf.randomTimeout(rf.electionTimeout)
 	for !rf.killed() && rf.getState() == raftStateFollower {
 		select {
 		case <-heartBeatTimer:
+			// 刷新心跳定时器
 			heartBeatTimer = rf.randomTimeout(rf.electionTimeout)
 			lastContact, _ := rf.getLastContact()
 			if time.Now().Sub(lastContact) < rf.electionTimeout {
 				continue
 			}
 			util.DPrintf("%v S%v follower become candidate", util.DInfo, rf.me)
+			// 没有按时收到心跳，切为 candidate
 			rf.setState(raftStateCandidate)
 		case rpc := <-rf.rpcCh:
+			// 处理 RPC 请求
 			rf.processRPC(rpc)
 		case s := <-rf.startCommandCh:
+			// 处理上层额命令
 			s.LeaderID = rf.leaderID
 			s.IsLeader <- false
 		}
@@ -209,18 +231,24 @@ func (rf *Raft) runAsFollower() {
 func (rf *Raft) replication(replCtx *replicationContext) {
 	stopHeartBeatCh := make(chan struct{})
 	defer func() {
+		// 通知心跳协程结束运行
 		close(stopHeartBeatCh)
 	}()
+	// 启动运行心跳协程
 	go rf.sendHeartBeat(replCtx, stopHeartBeatCh)
 
 	for !rf.killed() {
 		select {
 		case <-replCtx.stopReplicateCh:
 			util.DPrintf("%v S%v stop replicate %+v", util.DLeader, rf.me, replCtx)
+			// 停止复制，结束运行
 			return
 		case <-replCtx.canReplicateCh:
+			// 获取要发送的日志
 			logs := rf.persister.getLogs(replCtx.nextIndex - 1)
 			if len(logs) == 0 {
+				// todo 这里有问题，快照没发成功的情况没有处理
+				// 发送快照
 				rf.sendSnapshot(replCtx)
 			} else {
 				// 没复制成功通知继续复制
@@ -256,6 +284,7 @@ func (rf *Raft) sendSnapshot(replCtx *replicationContext) {
 }
 
 func (rf *Raft) replicateTo(replCtx *replicationContext, logs []Log) bool {
+	// 填充日志复制参数
 	var args AppendEntriesArgs
 	args.Term = replCtx.currentTerm
 	args.LeaderID = rf.me
@@ -266,16 +295,19 @@ func (rf *Raft) replicateTo(replCtx *replicationContext, logs []Log) bool {
 
 	util.DPrintf("%v S%v replicate to S%v args %+v", util.DLeader, rf.me, replCtx.target, args)
 	var reply AppendEntriesReply
+	// 发送日志复制请求
 	if err := rf.transport.AppendEntries(replCtx.target, &args, &reply); err != nil {
 		util.DPrintf("%v S%v replicate to S%v err %+v", util.DLeader, rf.me, replCtx.target, err)
 		return false
 	}
+	// 发现更大的任期，通知切状态
 	if reply.Term > replCtx.currentTerm {
 		rf.asyncNotifyCh(replCtx.becomeFollowerCh)
 		return true
 	}
 
 	replCtx.updateLastContact()
+	// 日志复制失败，回退 nextIndex
 	if !reply.Success {
 		replCtx.nextIndex = reply.ConflictFirstIndex
 		return false
@@ -287,11 +319,13 @@ func (rf *Raft) replicateTo(replCtx *replicationContext, logs []Log) bool {
 	rf.matchIndexLock.Lock()
 	defer rf.matchIndexLock.Unlock()
 	lastLogIndex := args.PrevLogIndex + len(args.Entries)
+	// 更新 matchIndex
 	if lastLogIndex > rf.matchIndex[rf.me] {
 		rf.matchIndex[rf.me] = lastLogIndex
 	}
 	rf.matchIndex[replCtx.target] = matchIndex
 	commitIndex := rf.calculate()
+	// 更新 lastCommitIndex，这里要注意只能提交自己任期的日志
 	if args.LeaderCommitIndex < commitIndex && replCtx.currentTerm == rf.persister.getLog(commitIndex).Term {
 		rf.setLastCommitIndex(commitIndex)
 		rf.asyncNotifyCh(rf.commitCh)

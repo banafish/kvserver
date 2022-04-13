@@ -35,6 +35,7 @@ type KVServer struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	// 当前节点不是 leader
 	if !kv.rf.IsLeader() {
 		reply.Err = ErrWrongLeader
 		return
@@ -42,6 +43,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	waitFreeIndex := kv.rf.WaitFreeIndex()
 	kv.mu.Lock()
+	// 等待日志应用到 waitFreeIndex
 	for kv.lastApplyIndex < waitFreeIndex {
 		kv.lastApplyIndexCond.Wait()
 	}
@@ -62,6 +64,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	seq := kv.executeMap[op.ClientID]
 	kv.mu.Unlock()
+	// 去重
 	if seq >= op.Seq {
 		return
 	}
@@ -71,6 +74,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Command: op,
 		Reply:   replyCh,
 	}
+	// 交给 Raft 共识
 	_, _, isLeader := kv.rf.Start(s)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -79,6 +83,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
+	// 等待回复
 	res := <-replyCh
 	if v, ok := res.(PutAppendReply); ok {
 		reply.Err = v.Err
@@ -140,7 +145,6 @@ func (kv *KVServer) applier(applyCh chan raft.ApplyMsg) {
 func (kv *KVServer) handleOp(m raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	// 超，忘记改这里了
 	if m.CommandIndex <= kv.lastApplyIndex {
 		return
 	}
@@ -179,6 +183,8 @@ func (kv *KVServer) handleOp(m raft.ApplyMsg) {
 		kv.stateMachine[op.Key] = op.Value
 	case OpTypeAppend:
 		kv.stateMachine[op.Key] = kv.stateMachine[op.Key] + op.Value
+	case OpTypeDelete:
+		delete(kv.stateMachine, op.Key)
 	}
 	kv.executeMap[op.ClientID] = op.Seq
 }
